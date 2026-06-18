@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import Command, CommandStart
@@ -382,6 +383,14 @@ async def noop(callback: CallbackQuery):
 async def main():
     if not config.BOT_TOKEN:
         raise RuntimeError("Не задан BOT_TOKEN. См. README.md")
+
+    logging.info(
+        "DB_PATH=%s | DATA_DIR env=%r | SHARED_DIR env=%r | существует ли база до старта: %s",
+        config.DB_PATH,
+        os.getenv("DATA_DIR"),
+        os.getenv("SHARED_DIR"),
+        os.path.exists(config.DB_PATH),
+    )
 
     db.init_db()
     bot = Bot(token=config.BOT_TOKEN)
