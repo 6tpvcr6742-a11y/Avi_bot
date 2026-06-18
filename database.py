@@ -77,6 +77,14 @@ def delete_listing(listing_id):
         conn.execute("DELETE FROM listings WHERE id = ?", (listing_id,))
 
 
+def update_listing_field(listing_id, field, value):
+    allowed_fields = {"title", "price", "description", "avito_url", "brand", "photo_id"}
+    if field not in allowed_fields:
+        raise ValueError(f"ÐÐµÐ´Ð¾Ð¿ÑÑÑÐ¸Ð¼Ð¾Ðµ Ð¿Ð¾Ð»Ðµ: {field}")
+    with get_conn() as conn:
+        conn.execute(f"UPDATE listings SET {field} = ? WHERE id = ?", (value, listing_id))
+
+
 def set_listing_active(listing_id, active: bool):
     with get_conn() as conn:
         conn.execute(
