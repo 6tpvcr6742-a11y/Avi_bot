@@ -50,3 +50,29 @@ def admin_listings_kb(listings):
         kb.button(text=f"❌ Удалить #{l['id']}: {l['title'][:25]}", callback_data=f"del:{l['id']}")
     kb.adjust(1)
     return kb.as_markup()
+
+
+def edit_listings_kb(listings):
+    kb = InlineKeyboardBuilder()
+    for l in listings:
+        kb.button(text=f"#{l['id']}: {l['title'][:30]}", callback_data=f"editsel:{l['id']}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+EDIT_FIELDS = {
+    "title": "Название",
+    "price": "Цена",
+    "description": "Описание",
+    "avito_url": "Ссылка на Avito",
+    "brand": "Бренд",
+    "photo_id": "Фото",
+}
+
+
+def edit_fields_kb(listing_id):
+    kb = InlineKeyboardBuilder()
+    for field, label in EDIT_FIELDS.items():
+        kb.button(text=label, callback_data=f"editfield:{listing_id}:{field}")
+    kb.adjust(2)
+    return kb.as_markup()
