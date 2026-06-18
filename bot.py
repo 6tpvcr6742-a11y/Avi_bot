@@ -17,7 +17,7 @@ router = Router()
 
 
 def is_admin(user_id: int) -> bool:
-    return config.ADMIN_ID != 0 and user_id == config.ADMIN_ID
+    return user_id in config.ADMIN_IDS
 
 
 # ===================== FSM: добавление товара =====================
@@ -107,6 +107,74 @@ async def add_listing_photo(message: Message, state: FSMContext):
 @router.message(AddListing.photo)
 async def add_listing_photo_invalid(message: Message):
     await message.answer("Нужно именно фото. Пришли картинку товара.")
+
+
+# ===================== /edit: редактирование товара =====================
+
+class EditListing(StatesGroup):
+    waiting_value = State()
+
+
+@router.message(Command("edit"))
+async def edit_start(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    listings = db.list_listings(active_only=False)
+    if not listings:
+        await message.answer("Пока нет ни одного товара. Добавь через /add")
+        return
+    await message.answer("Какой товар редактируем?", reply_markup=kb.edit_listings_kb(listings))
+
+
+@router.callback_query(F.data.startswith("editsel:"))
+async def edit_select_listing(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer()
+        return
+    listing_id = int(callback.data.split(":")[1])
+    await callback.message.edit_text(
+        "Что меняем в этом товаре?", reply_markup=kb.edit_fields_kb(listing_id)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("editfield:"))
+async def edit_select_field(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer()
+        return
+    _, listing_id, field = callback.data.split(":")
+    await state.set_state(EditListing.waiting_value)
+    await state.update_data(listing_id=int(listing_id), field=field)
+
+    if field == "photo_id":
+        await callback.message.edit_text("Пришли новое фото товара.")
+    else:
+        label = kb.EDIT_FIELDS[field]
+        await callback.message.edit_text(f"Пришли новое значение для «{label}»:")
+    await callback.answer()
+
+
+@router.message(EditListing.waiting_value, F.photo)
+async def edit_apply_photo(message: Message, state: FSMContext):
+    data = await state.get_data()
+    if data["field"] != "photo_id":
+        await message.answer("Для этого поля нужен текст, а не фото.")
+        return
+    db.update_listing_field(data["listing_id"], "photo_id", message.photo[-1].file_id)
+    await state.clear()
+    await message.answer(f"✅ Товар #{data['listing_id']} обновлён.")
+
+
+@router.message(EditListing.waiting_value, F.text)
+async def edit_apply_text(message: Message, state: FSMContext):
+    data = await state.get_data()
+    if data["field"] == "photo_id":
+        await message.answer("Для фото нужно прислать именно картинку.")
+        return
+    db.update_listing_field(data["listing_id"], data["field"], message.text.strip())
+    await state.clear()
+    await message.answer(f"✅ Товар #{data['listing_id']} обновлён.")
 
 
 # ===================== FSM: добавление гайда по размерам =====================
