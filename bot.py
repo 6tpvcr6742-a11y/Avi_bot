@@ -15,6 +15,10 @@ logging.basicConfig(level=logging.INFO)
 
 router = Router()
 
+# Telegram ограничивает подпись к фото 1024 символами, в это же число входят
+# название и цена. Поэтому держим описание заметно короче этого лимита.
+MAX_DESCRIPTION_LEN = 700
+
 
 def is_admin(user_id: int) -> bool:
     return user_id in config.ADMIN_IDS
@@ -72,7 +76,16 @@ async def add_listing_price(message: Message, state: FSMContext):
 
 @router.message(AddListing.description)
 async def add_listing_description(message: Message, state: FSMContext):
-    await state.update_data(description=message.text.strip())
+    description = message.text.strip()
+    if len(description) > MAX_DESCRIPTION_LEN:
+        await message.answer(
+            f"Описание слишком длинное ({len(description)} символов). "
+            f"Telegram ограничивает подпись к фото 1024 символами, поэтому описание "
+            f"должно быть короче {MAX_DESCRIPTION_LEN} символов (с учётом названия и цены). "
+            "Сократи и пришли заново."
+        )
+        return
+    await state.update_data(description=description)
     await state.set_state(AddListing.brand)
     await message.answer(
         "Бренд (например: Uniqlo). Если хочешь привязать гайд по размерам — "
@@ -172,7 +185,14 @@ async def edit_apply_text(message: Message, state: FSMContext):
     if data["field"] == "photo_id":
         await message.answer("Для фото нужно прислать именно картинку.")
         return
-    db.update_listing_field(data["listing_id"], data["field"], message.text.strip())
+    value = message.text.strip()
+    if data["field"] == "description" and len(value) > MAX_DESCRIPTION_LEN:
+        await message.answer(
+            f"Описание слишком длинное ({len(value)} символов). "
+            f"Должно быть короче {MAX_DESCRIPTION_LEN} символов. Сократи и пришли заново."
+        )
+        return
+    db.update_listing_field(data["listing_id"], data["field"], value)
     await state.clear()
     await message.answer(f"✅ Товар #{data['listing_id']} обновлён.")
 
@@ -260,9 +280,11 @@ async def start(message: Message):
 
 @router.callback_query(F.data == "menu")
 async def back_to_menu(callback: CallbackQuery):
-    await callback.message.edit_text(
-        "Главное меню:", reply_markup=kb.main_menu_kb()
-    )
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.message.answer("Главное меню:", reply_markup=kb.main_menu_kb())
     await callback.answer()
 
 
@@ -281,16 +303,27 @@ async def show_catalog(callback: CallbackQuery):
     item = listings[index]
 
     caption = f"<b>{item['title']}</b>\n💰 {item['price']}\n\n{item['description']}"
+    if len(caption) > 1024:
+        caption = caption[:1020] + "…"
     markup = kb.catalog_item_kb(item, index, len(listings))
 
-    await callback.message.delete()
-    if item["photo_id"]:
-        await callback.message.answer_photo(
-            item["photo_id"], caption=caption, reply_markup=markup, parse_mode="HTML"
+    try:
+        await callback.message.delete()
+        if item["photo_id"]:
+            await callback.message.answer_photo(
+                item["photo_id"], caption=caption, reply_markup=markup, parse_mode="HTML"
+            )
+        else:
+            await callback.message.answer(caption, reply_markup=markup, parse_mode="HTML")
+    except Exception:
+        logging.exception("Не удалось показать товар #%s в каталоге", item["id"])
+        await callback.message.answer(
+            "Не получилось показать этот товар (слишком длинное описание или ошибка). "
+            "Сообщи об этом администратору.",
+            reply_markup=kb.back_to_menu_kb(),
         )
-    else:
-        await callback.message.answer(caption, reply_markup=markup, parse_mode="HTML")
-    await callback.answer()
+    finally:
+        await callback.answer()
 
 
 @router.callback_query(F.data == "guides")
