@@ -1,7 +1,12 @@
+import os
 import sqlite3
 from contextlib import contextmanager
 
 from config import DB_PATH
+
+_db_dir = os.path.dirname(DB_PATH)
+if _db_dir:
+    os.makedirs(_db_dir, exist_ok=True)
 
 
 @contextmanager
@@ -80,7 +85,7 @@ def delete_listing(listing_id):
 def update_listing_field(listing_id, field, value):
     allowed_fields = {"title", "price", "description", "avito_url", "brand", "photo_id"}
     if field not in allowed_fields:
-        raise ValueError(f"ÐÐµÐ´Ð¾Ð¿ÑÑÑÐ¸Ð¼Ð¾Ðµ Ð¿Ð¾Ð»Ðµ: {field}")
+        raise ValueError(f"Недопустимое поле: {field}")
     with get_conn() as conn:
         conn.execute(f"UPDATE listings SET {field} = ? WHERE id = ?", (value, listing_id))
 
