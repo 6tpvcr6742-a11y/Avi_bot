@@ -33,6 +33,8 @@ class AddListing(StatesGroup):
     price = State()
     description = State()
     brand = State()
+    category = State()
+    size = State()
     photo = State()
 
 
@@ -98,6 +100,28 @@ async def add_listing_description(message: Message, state: FSMContext):
 async def add_listing_brand(message: Message, state: FSMContext):
     brand = message.text.strip()
     await state.update_data(brand=None if brand == "-" else brand)
+    await state.set_state(AddListing.category)
+    await message.answer(
+        "Категория (например: Куртки, Кроссовки, Футболки). Используй одно и то же "
+        "название для одинаковых товаров — тогда они будут попадать в одну кнопку "
+        "у покупателя. Если без категории — отправь «-»."
+    )
+
+
+@router.message(AddListing.category)
+async def add_listing_category(message: Message, state: FSMContext):
+    category = message.text.strip()
+    await state.update_data(category=None if category == "-" else category)
+    await state.set_state(AddListing.size)
+    await message.answer(
+        "Размер (например: XL или 42). Если без размера — отправь «-»."
+    )
+
+
+@router.message(AddListing.size)
+async def add_listing_size(message: Message, state: FSMContext):
+    size = message.text.strip()
+    await state.update_data(size=None if size == "-" else size)
     await state.set_state(AddListing.photo)
     await message.answer("Пришли одно фото товара (просто фото, без файла-документа).")
 
@@ -112,6 +136,8 @@ async def add_listing_photo(message: Message, state: FSMContext):
         description=data["description"],
         avito_url=data["avito_url"],
         brand=data.get("brand"),
+        category=data.get("category"),
+        size=data.get("size"),
         photo_id=photo_id,
     )
     await state.clear()
@@ -327,7 +353,86 @@ async def show_catalog(callback: CallbackQuery):
         await callback.answer()
 
 
-@router.callback_query(F.data == "guides")
+@router.callback_query(F.data == "categories")
+async def show_categories(callback: CallbackQuery):
+    categories = db.list_categories(active_only=True)
+    if not categories:
+        await callback.message.edit_text(
+            "Категорий пока нет.", reply_markup=kb.back_to_menu_kb()
+        )
+        await callback.answer()
+        return
+    await callback.message.edit_text(
+        "Выбери категорию:", reply_markup=kb.categories_kb(categories)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cat:"))
+async def show_sizes_in_category(callback: CallbackQuery, state: FSMContext):
+    category = callback.data.split(":", 1)[1]
+    await state.update_data(browse_category=category, browse_size=None)
+    sizes = db.list_sizes_in_category(category, active_only=True)
+    await callback.message.edit_text(
+        f"Категория «{category}». Выбери размер:",
+        reply_markup=kb.sizes_kb(sizes),
+    )
+    await callback.answer()
+
+
+async def _show_filtered_item(callback: CallbackQuery, state: FSMContext, index: int):
+    data = await state.get_data()
+    category = data.get("browse_category")
+    size = data.get("browse_size")
+    listings = db.list_listings_filtered(category=category, size=size, active_only=True)
+
+    if not listings:
+        await callback.message.edit_text(
+            "По этому фильтру пока ничего нет.", reply_markup=kb.back_to_menu_kb()
+        )
+        await callback.answer()
+        return
+
+    index = max(0, min(index, len(listings) - 1))
+    item = listings[index]
+
+    caption = f"<b>{item['title']}</b>\n💰 {item['price']}\n\n{item['description']}"
+    if len(caption) > 1024:
+        caption = caption[:1020] + "…"
+    markup = kb.filtered_item_kb(item, index, len(listings), category or "")
+
+    try:
+        await callback.message.delete()
+        if item["photo_id"]:
+            await callback.message.answer_photo(
+                item["photo_id"], caption=caption, reply_markup=markup, parse_mode="HTML"
+            )
+        else:
+            await callback.message.answer(caption, reply_markup=markup, parse_mode="HTML")
+    except Exception:
+        logging.exception("Не удалось показать товар #%s по фильтру", item["id"])
+        await callback.message.answer(
+            "Не получилось показать этот товар. Сообщи об этом администратору.",
+            reply_markup=kb.back_to_menu_kb(),
+        )
+    finally:
+        await callback.answer()
+
+
+@router.callback_query(F.data.startswith("catsize:"))
+async def select_size(callback: CallbackQuery, state: FSMContext):
+    value = callback.data.split(":", 1)[1]
+    await state.update_data(browse_size=None if value == "all" else value)
+    await _show_filtered_item(callback, state, 0)
+
+
+@router.callback_query(F.data.startswith("catpage:"))
+async def paginate_filtered(callback: CallbackQuery, state: FSMContext):
+    index = int(callback.data.split(":", 1)[1])
+    await _show_filtered_item(callback, state, index)
+
+
+
 async def show_guides_list(callback: CallbackQuery):
     guides = db.list_guides()
     if not guides:
