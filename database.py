@@ -31,12 +31,22 @@ def init_db():
                 description TEXT,
                 avito_url TEXT NOT NULL,
                 brand TEXT,
+                category TEXT,
+                size TEXT,
                 photo_id TEXT,
                 active INTEGER DEFAULT 1,
                 created_at TEXT DEFAULT (datetime('now'))
             )
             """
         )
+        # Для базы, созданной до появления категорий/размеров — добавляем
+        # колонки отдельно (SQLite не поддерживает ADD COLUMN IF NOT EXISTS).
+        for column in ("category", "size"):
+            try:
+                conn.execute(f"ALTER TABLE listings ADD COLUMN {column} TEXT")
+            except sqlite3.OperationalError:
+                pass  # колонка уже существует
+
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS guides (
@@ -51,12 +61,13 @@ def init_db():
 
 # ---------- Listings ----------
 
-def add_listing(title, price, description, avito_url, brand, photo_id):
+def add_listing(title, price, description, avito_url, brand, category, size, photo_id):
     with get_conn() as conn:
         cur = conn.execute(
-            """INSERT INTO listings (title, price, description, avito_url, brand, photo_id)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (title, price, description, avito_url, brand, photo_id),
+            """INSERT INTO listings
+               (title, price, description, avito_url, brand, category, size, photo_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (title, price, description, avito_url, brand, category, size, photo_id),
         )
         return cur.lastrowid
 
@@ -68,6 +79,47 @@ def list_listings(active_only=True):
             query += " WHERE active = 1"
         query += " ORDER BY id DESC"
         return conn.execute(query).fetchall()
+
+
+def list_categories(active_only=True):
+    with get_conn() as conn:
+        query = (
+            "SELECT DISTINCT category FROM listings "
+            "WHERE category IS NOT NULL AND category != ''"
+        )
+        if active_only:
+            query += " AND active = 1"
+        query += " ORDER BY category"
+        return [row["category"] for row in conn.execute(query).fetchall()]
+
+
+def list_sizes_in_category(category, active_only=True):
+    with get_conn() as conn:
+        query = (
+            "SELECT DISTINCT size FROM listings "
+            "WHERE category = ? AND size IS NOT NULL AND size != ''"
+        )
+        params = [category]
+        if active_only:
+            query += " AND active = 1"
+        query += " ORDER BY size"
+        return [row["size"] for row in conn.execute(query, params).fetchall()]
+
+
+def list_listings_filtered(category=None, size=None, active_only=True):
+    with get_conn() as conn:
+        query = "SELECT * FROM listings WHERE 1=1"
+        params = []
+        if category:
+            query += " AND category = ?"
+            params.append(category)
+        if size:
+            query += " AND size = ?"
+            params.append(size)
+        if active_only:
+            query += " AND active = 1"
+        query += " ORDER BY id DESC"
+        return conn.execute(query, params).fetchall()
 
 
 def get_listing(listing_id):
@@ -83,7 +135,10 @@ def delete_listing(listing_id):
 
 
 def update_listing_field(listing_id, field, value):
-    allowed_fields = {"title", "price", "description", "avito_url", "brand", "photo_id"}
+    allowed_fields = {
+        "title", "price", "description", "avito_url",
+        "brand", "category", "size", "photo_id",
+    }
     if field not in allowed_fields:
         raise ValueError(f"Недопустимое поле: {field}")
     with get_conn() as conn:
