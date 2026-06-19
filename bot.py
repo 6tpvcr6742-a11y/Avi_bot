@@ -297,35 +297,49 @@ async def delete_listing_cb(callback: CallbackQuery):
 
 # ===================== Покупатель: меню, каталог, гайды =====================
 
+class Browse(StatesGroup):
+    categories = State()
+    sizes = State()
+    guides = State()
+
+
 @router.message(CommandStart())
-async def start(message: Message):
+async def start(message: Message, state: FSMContext):
+    await state.clear()
     await message.answer(
         "Привет! Здесь можно посмотреть мои товары и подобрать размер перед покупкой 👇",
-        reply_markup=kb.main_menu_kb(),
+        reply_markup=kb.main_reply_kb(),
     )
 
 
+@router.message(F.text == "⬅️ Главное меню")
+async def menu_button(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Главное меню:", reply_markup=kb.main_reply_kb())
+
+
 @router.callback_query(F.data == "menu")
-async def back_to_menu(callback: CallbackQuery):
+async def back_to_menu_inline(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
     try:
         await callback.message.delete()
     except Exception:
         pass
-    await callback.message.answer("Главное меню:", reply_markup=kb.main_menu_kb())
+    await callback.message.answer("Главное меню:", reply_markup=kb.main_reply_kb())
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("catalog:"))
-async def show_catalog(callback: CallbackQuery):
-    listings = db.list_listings(active_only=True)
+async def _send_catalog_item(target, listings, index: int):
+    """target — это Message (новое сообщение) либо CallbackQuery (пагинация)."""
+    is_callback = isinstance(target, CallbackQuery)
+    message = target.message if is_callback else target
+
     if not listings:
-        await callback.message.edit_text(
-            "Каталог пока пуст.", reply_markup=kb.back_to_menu_kb()
-        )
-        await callback.answer()
+        await message.answer("Каталог пока пуст.")
+        if is_callback:
+            await target.answer()
         return
 
-    index = int(callback.data.split(":")[1])
     index = max(0, min(index, len(listings) - 1))
     item = listings[index]
 
@@ -335,62 +349,81 @@ async def show_catalog(callback: CallbackQuery):
     markup = kb.catalog_item_kb(item, index, len(listings))
 
     try:
-        await callback.message.delete()
+        if is_callback:
+            await message.delete()
         if item["photo_id"]:
-            await callback.message.answer_photo(
-                item["photo_id"], caption=caption, reply_markup=markup, parse_mode="HTML"
-            )
+            await message.answer_photo(item["photo_id"], caption=caption, reply_markup=markup, parse_mode="HTML")
         else:
-            await callback.message.answer(caption, reply_markup=markup, parse_mode="HTML")
+            await message.answer(caption, reply_markup=markup, parse_mode="HTML")
     except Exception:
         logging.exception("Не удалось показать товар #%s в каталоге", item["id"])
-        await callback.message.answer(
-            "Не получилось показать этот товар (слишком длинное описание или ошибка). "
-            "Сообщи об этом администратору.",
-            reply_markup=kb.back_to_menu_kb(),
-        )
+        await message.answer("Не получилось показать этот товар. Сообщи об этом администратору.")
     finally:
-        await callback.answer()
+        if is_callback:
+            await target.answer()
 
 
-@router.callback_query(F.data == "categories")
-async def show_categories(callback: CallbackQuery):
+@router.message(F.text == "📦 Каталог")
+async def menu_catalog(message: Message, state: FSMContext):
+    await state.clear()
+    listings = db.list_listings(active_only=True)
+    await _send_catalog_item(message, listings, 0)
+
+
+@router.callback_query(F.data.startswith("catalog:"))
+async def paginate_catalog(callback: CallbackQuery):
+    listings = db.list_listings(active_only=True)
+    index = int(callback.data.split(":")[1])
+    await _send_catalog_item(callback, listings, index)
+
+
+@router.message(F.text == "🗂 По категориям")
+async def menu_categories(message: Message, state: FSMContext):
     categories = db.list_categories(active_only=True)
     if not categories:
-        await callback.message.edit_text(
-            "Категорий пока нет.", reply_markup=kb.back_to_menu_kb()
-        )
-        await callback.answer()
+        await message.answer("Категорий пока нет.", reply_markup=kb.main_reply_kb())
+        await state.clear()
         return
-    await callback.message.edit_text(
-        "Выбери категорию:", reply_markup=kb.categories_kb(categories)
-    )
-    await callback.answer()
+    await state.set_state(Browse.categories)
+    await message.answer("Выбери категорию:", reply_markup=kb.categories_reply_kb(categories))
 
 
-@router.callback_query(F.data.startswith("cat:"))
-async def show_sizes_in_category(callback: CallbackQuery, state: FSMContext):
-    category = callback.data.split(":", 1)[1]
+@router.message(Browse.categories)
+async def choose_category(message: Message, state: FSMContext):
+    category = message.text.strip()
+    categories = db.list_categories(active_only=True)
+    if category not in categories:
+        await message.answer("Выбери категорию кнопкой ниже 👇")
+        return
     await state.update_data(browse_category=category, browse_size=None)
+    await state.set_state(Browse.sizes)
     sizes = db.list_sizes_in_category(category, active_only=True)
-    await callback.message.edit_text(
+    await message.answer(
         f"Категория «{category}». Выбери размер:",
-        reply_markup=kb.sizes_kb(sizes),
+        reply_markup=kb.sizes_reply_kb(sizes),
     )
-    await callback.answer()
 
 
-async def _show_filtered_item(callback: CallbackQuery, state: FSMContext, index: int):
+@router.message(F.text == "⬅️ Назад", Browse.sizes)
+async def sizes_back_to_categories(message: Message, state: FSMContext):
+    categories = db.list_categories(active_only=True)
+    await state.set_state(Browse.categories)
+    await message.answer("Выбери категорию:", reply_markup=kb.categories_reply_kb(categories))
+
+
+async def _send_filtered_item(target, state: FSMContext, index: int):
+    is_callback = isinstance(target, CallbackQuery)
+    message = target.message if is_callback else target
+
     data = await state.get_data()
     category = data.get("browse_category")
     size = data.get("browse_size")
     listings = db.list_listings_filtered(category=category, size=size, active_only=True)
 
     if not listings:
-        await callback.message.edit_text(
-            "По этому фильтру пока ничего нет.", reply_markup=kb.back_to_menu_kb()
-        )
-        await callback.answer()
+        await message.answer("По этому фильтру пока ничего нет.")
+        if is_callback:
+            await target.answer()
         return
 
     index = max(0, min(index, len(listings) - 1))
@@ -399,75 +432,89 @@ async def _show_filtered_item(callback: CallbackQuery, state: FSMContext, index:
     caption = f"<b>{item['title']}</b>\n💰 {item['price']}\n\n{item['description']}"
     if len(caption) > 1024:
         caption = caption[:1020] + "…"
-    markup = kb.filtered_item_kb(item, index, len(listings), category or "")
+    markup = kb.filtered_item_kb(item, index, len(listings))
 
     try:
-        await callback.message.delete()
+        if is_callback:
+            await message.delete()
         if item["photo_id"]:
-            await callback.message.answer_photo(
-                item["photo_id"], caption=caption, reply_markup=markup, parse_mode="HTML"
-            )
+            await message.answer_photo(item["photo_id"], caption=caption, reply_markup=markup, parse_mode="HTML")
         else:
-            await callback.message.answer(caption, reply_markup=markup, parse_mode="HTML")
+            await message.answer(caption, reply_markup=markup, parse_mode="HTML")
     except Exception:
         logging.exception("Не удалось показать товар #%s по фильтру", item["id"])
-        await callback.message.answer(
-            "Не получилось показать этот товар. Сообщи об этом администратору.",
-            reply_markup=kb.back_to_menu_kb(),
-        )
+        await message.answer("Не получилось показать этот товар. Сообщи об этом администратору.")
     finally:
-        await callback.answer()
+        if is_callback:
+            await target.answer()
 
 
-@router.callback_query(F.data.startswith("catsize:"))
-async def select_size(callback: CallbackQuery, state: FSMContext):
-    value = callback.data.split(":", 1)[1]
-    await state.update_data(browse_size=None if value == "all" else value)
-    await _show_filtered_item(callback, state, 0)
+@router.message(Browse.sizes)
+async def choose_size(message: Message, state: FSMContext):
+    value = message.text.strip()
+    data = await state.get_data()
+    category = data.get("browse_category")
+    sizes = db.list_sizes_in_category(category, active_only=True) if category else []
+    if value != "Все размеры" and value not in sizes:
+        await message.answer("Выбери размер кнопкой ниже 👇")
+        return
+    await state.update_data(browse_size=None if value == "Все размеры" else value)
+    await _send_filtered_item(message, state, 0)
 
 
 @router.callback_query(F.data.startswith("catpage:"))
 async def paginate_filtered(callback: CallbackQuery, state: FSMContext):
     index = int(callback.data.split(":", 1)[1])
-    await _show_filtered_item(callback, state, index)
+    await _send_filtered_item(callback, state, index)
 
 
-
-async def show_guides_list(callback: CallbackQuery):
-    guides = db.list_guides()
-    if not guides:
-        await callback.message.edit_text(
-            "Гайдов пока нет.", reply_markup=kb.back_to_menu_kb()
-        )
+@router.callback_query(F.data == "backsizes")
+async def back_to_sizes_from_item(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    category = data.get("browse_category")
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    if not category:
+        await state.clear()
+        await callback.message.answer("Главное меню:", reply_markup=kb.main_reply_kb())
         await callback.answer()
         return
-    await callback.message.edit_text(
-        "Выбери бренд, чтобы посмотреть, как подобрать размер:",
-        reply_markup=kb.guides_list_kb(guides),
+    await state.set_state(Browse.sizes)
+    sizes = db.list_sizes_in_category(category, active_only=True)
+    await callback.message.answer(
+        f"Категория «{category}». Выбери размер:",
+        reply_markup=kb.sizes_reply_kb(sizes),
     )
     await callback.answer()
 
 
-async def _send_guide(callback: CallbackQuery, guide):
-    await callback.message.delete()
-    if guide["photo_id"]:
-        await callback.message.answer_photo(
-            guide["photo_id"], caption=guide["text"], reply_markup=kb.back_to_menu_kb()
-        )
-    else:
-        await callback.message.answer(guide["text"], reply_markup=kb.back_to_menu_kb())
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("guide:"))
-async def show_guide(callback: CallbackQuery):
-    guide_id = int(callback.data.split(":")[1])
-    with db.get_conn() as conn:
-        guide = conn.execute("SELECT * FROM guides WHERE id = ?", (guide_id,)).fetchone()
-    if not guide:
-        await callback.answer("Гайд не найден", show_alert=True)
+@router.message(F.text == "📏 Гайды по размерам")
+async def menu_guides(message: Message, state: FSMContext):
+    guides = db.list_guides()
+    if not guides:
+        await message.answer("Гайдов пока нет.", reply_markup=kb.main_reply_kb())
+        await state.clear()
         return
-    await _send_guide(callback, guide)
+    await state.set_state(Browse.guides)
+    await message.answer(
+        "Выбери бренд, чтобы посмотреть, как подобрать размер:",
+        reply_markup=kb.guides_reply_kb(guides),
+    )
+
+
+@router.message(Browse.guides)
+async def choose_guide(message: Message, state: FSMContext):
+    brand = message.text.strip()
+    guide = db.get_guide_by_brand(brand)
+    if not guide:
+        await message.answer("Выбери бренд кнопкой ниже 👇")
+        return
+    if guide["photo_id"]:
+        await message.answer_photo(guide["photo_id"], caption=guide["text"])
+    else:
+        await message.answer(guide["text"])
 
 
 @router.callback_query(F.data.startswith("guide_for:"))
@@ -477,7 +524,11 @@ async def show_guide_for_brand(callback: CallbackQuery):
     if not guide:
         await callback.answer("Для этого бренда гайда пока нет", show_alert=True)
         return
-    await _send_guide(callback, guide)
+    if guide["photo_id"]:
+        await callback.message.answer_photo(guide["photo_id"], caption=guide["text"])
+    else:
+        await callback.message.answer(guide["text"])
+    await callback.answer()
 
 
 @router.callback_query(F.data == "noop")
