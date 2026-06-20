@@ -1,8 +1,9 @@
 import asyncio
 import logging
 import os
+import time
 
-from aiogram import Bot, Dispatcher, Router, F
+from aiogram import BaseMiddleware, Bot, Dispatcher, Router, F
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -23,6 +24,38 @@ MAX_DESCRIPTION_LEN = 700
 
 def is_admin(user_id: int) -> bool:
     return user_id in config.ADMIN_IDS
+
+
+async def _callback_error(callback: CallbackQuery, text: str = "Что-то пошло не так, попробуй ещё раз."):
+    logging.warning("Некорректные данные в callback: %r", callback.data)
+    try:
+        await callback.answer(text, show_alert=True)
+    except Exception:
+        pass
+
+
+class ThrottlingMiddleware(BaseMiddleware):
+    """Не даёт одному пользователю слать действия чаще, чем раз в RATE_LIMIT секунд."""
+
+    RATE_LIMIT = 0.4  # секунд между действиями одного пользователя
+
+    def __init__(self):
+        self._last_action: dict[int, float] = {}
+
+    async def __call__(self, handler, event, data):
+        user = data.get("event_from_user")
+        if user is not None:
+            now = time.monotonic()
+            last = self._last_action.get(user.id, 0.0)
+            if now - last < self.RATE_LIMIT:
+                if isinstance(event, CallbackQuery):
+                    try:
+                        await event.answer()
+                    except Exception:
+                        pass
+                return None
+            self._last_action[user.id] = now
+        return await handler(event, data)
 
 
 # ===================== FSM: добавление товара =====================
@@ -171,7 +204,11 @@ async def edit_select_listing(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer()
         return
-    listing_id = int(callback.data.split(":")[1])
+    try:
+        listing_id = int(callback.data.split(":")[1])
+    except (IndexError, ValueError):
+        await _callback_error(callback)
+        return
     await callback.message.edit_text(
         "Что меняем в этом товаре?", reply_markup=kb.edit_fields_kb(listing_id)
     )
@@ -183,14 +220,21 @@ async def edit_select_field(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         await callback.answer()
         return
-    _, listing_id, field = callback.data.split(":")
+    try:
+        _, listing_id_str, field = callback.data.split(":")
+        listing_id = int(listing_id_str)
+        if field != "photo_id":
+            label = kb.EDIT_FIELDS[field]
+    except (ValueError, KeyError):
+        await _callback_error(callback)
+        return
+
     await state.set_state(EditListing.waiting_value)
-    await state.update_data(listing_id=int(listing_id), field=field)
+    await state.update_data(listing_id=listing_id, field=field)
 
     if field == "photo_id":
         await callback.message.edit_text("Пришли новое фото товара.")
     else:
-        label = kb.EDIT_FIELDS[field]
         await callback.message.edit_text(f"Пришли новое значение для «{label}»:")
     await callback.answer()
 
@@ -289,7 +333,11 @@ async def delete_listing_cb(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer()
         return
-    listing_id = int(callback.data.split(":")[1])
+    try:
+        listing_id = int(callback.data.split(":")[1])
+    except (IndexError, ValueError):
+        await _callback_error(callback)
+        return
     db.delete_listing(listing_id)
     await callback.answer("Удалено")
     await callback.message.edit_text("Товар удалён.")
@@ -372,8 +420,12 @@ async def menu_catalog(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("catalog:"))
 async def paginate_catalog(callback: CallbackQuery):
+    try:
+        index = int(callback.data.split(":")[1])
+    except (IndexError, ValueError):
+        await _callback_error(callback)
+        return
     listings = db.list_listings(active_only=True)
-    index = int(callback.data.split(":")[1])
     await _send_catalog_item(callback, listings, index)
 
 
@@ -464,7 +516,11 @@ async def choose_size(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("catpage:"))
 async def paginate_filtered(callback: CallbackQuery, state: FSMContext):
-    index = int(callback.data.split(":", 1)[1])
+    try:
+        index = int(callback.data.split(":", 1)[1])
+    except (IndexError, ValueError):
+        await _callback_error(callback)
+        return
     await _send_filtered_item(callback, state, index)
 
 
@@ -551,6 +607,9 @@ async def main():
     db.init_db()
     bot = Bot(token=config.BOT_TOKEN)
     dp = Dispatcher()
+    throttling = ThrottlingMiddleware()
+    dp.message.middleware(throttling)
+    dp.callback_query.middleware(throttling)
     dp.include_router(router)
 
     await bot.delete_webhook(drop_pending_updates=True)
